@@ -109,9 +109,11 @@ def get_bars(start: datetime, end: datetime = None) -> pd.DataFrame:
 
 
 def get_session_bars(today: date) -> pd.DataFrame:
-    """Fetch full session: prev day 6PM UTC → now. Used once at startup."""
+    """Fetch full session: prev day 6PM ET → now. Converts ET→UTC correctly for DST."""
     prev = today - timedelta(days=1)
-    start_utc = datetime(prev.year, prev.month, prev.day, 23, 0)  # 6PM ET = 11PM UTC (approx)
+    six_pm_et = datetime(prev.year, prev.month, prev.day, 18, 0)
+    six_pm_et_aware = six_pm_et.replace(tzinfo=ET)
+    start_utc = six_pm_et_aware.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
     return get_bars(start_utc)
 
 
@@ -261,7 +263,7 @@ def run():
         h, m = now.hour, now.minute
 
         # Refresh bars every 2 min to pick up new closes (credit-efficient — only fetches new bars)
-        if (datetime.utcnow() - last_fetch).seconds >= 120:
+        if (datetime.utcnow() - last_fetch).total_seconds() >= 120:
             new = get_latest_bars(last_fetch)
             if not new.empty:
                 bars = pd.concat([bars, new]).sort_index()

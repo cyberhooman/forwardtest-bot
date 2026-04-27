@@ -10,14 +10,16 @@ Runs daily Mon-Fri, started by cron at 11:30 UTC.
 Logs to /root/orb_forward_test_baseline/trades.csv
 """
 import json, csv, time, logging, requests, sys, fcntl
-import yfinance as yf
+import pandas as pd
+import databento as db
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 # ── Credentials ───────────────────────────────────────────────────────────────
-TG_TOKEN   = "8552528128:AAF_kCmAVB8-7WvULrbDgvCrS4vbP9gL62o"
-TG_CHAT_ID = "1136518861"
+DATABENTO_KEY = "db-h5wnQp9gsEGnQXJATChvRkNY5hAv8"
+TG_TOKEN      = "8552528128:AAF_kCmAVB8-7WvULrbDgvCrS4vbP9gL62o"
+TG_CHAT_ID    = "1136518861"
 
 # ── Strategy params (v2.0 optimal) ────────────────────────────────────────────
 RR           = 6.0
@@ -56,14 +58,51 @@ def tg(msg: str):
         log.warning(f"Telegram error: {e}")
 
 
-# ── Market data ───────────────────────────────────────────────────────────────
-def get_bars():
-    bars = yf.Ticker("NQ=F").history(period="5d", interval="30m", auto_adjust=True)
-    if bars.empty:
-        return bars
-    bars.index = bars.index.tz_convert("America/New_York").tz_localize(None)
-    bars.columns = [c.lower() for c in bars.columns]
-    return bars
+# ── Databento data ────────────────────────────────────────────────────────────
+_db_client = None
+
+def _get_client():
+    global _db_client
+    if _db_client is None:
+        _db_client = db.Historical(DATABENTO_KEY)
+    return _db_client
+
+
+def get_bars(start: datetime, end: datetime = None) -> pd.DataFrame:
+    if end is None:
+        end = datetime.utcnow()
+    try:
+        client = _get_client()
+        data = client.timeseries.get_range(
+            dataset="GLBX.MDP3",
+            symbols=["NQ.v.0"],
+            schema="ohlcv-1m",
+            start=start.strftime("%Y-%m-%dT%H:%M:%S") + "Z",
+            end=end.strftime("%Y-%m-%dT%H:%M:%S") + "Z",
+            stype_in="continuous",
+        )
+        df = data.to_df()
+        if df.empty:
+            return pd.DataFrame()
+        df.index = pd.to_datetime(df.index, utc=True).tz_convert("America/New_York").tz_localize(None)
+        df = df[["open", "high", "low", "close", "volume"]].astype(float)
+        return df.resample("30min", label="left", closed="left").agg({
+            "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+        }).dropna(subset=["open"])
+    except Exception as e:
+        log.warning(f"Databento fetch error: {e}")
+        return pd.DataFrame()
+
+
+def get_session_bars(today: date) -> pd.DataFrame:
+    prev = today - timedelta(days=1)
+    six_pm_et = datetime(prev.year, prev.month, prev.day, 18, 0).replace(tzinfo=ET)
+    start_utc = six_pm_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    return get_bars(start_utc)
+
+
+def get_latest_bars(since: datetime) -> pd.DataFrame:
+    return get_bars(since - timedelta(minutes=5))
 
 
 # ── Session levels for SL anchoring ──────────────────────────────────────────
@@ -144,24 +183,39 @@ def run():
     log.info("=== ORB Baseline (No Filter) Runner started ===")
     state = load_state()
     today = date.today()
-
-    # No AlphaLabs call — macro_bias is always None (take every trade)
-    macro_bias = None
+    macro_bias = None  # always None — take every trade
 
     tg(f"<b>{LABEL} ORB Runner - {today}</b>\n"
        f"No macro filter — taking all valid ORB trades.\n"
+       f"Data: Databento CME GLBX\n"
        f"Waiting for 8:00 AM zone...")
+
+    log.info("Fetching session bars from Databento...")
+    bars = get_session_bars(today)
+    last_fetch = datetime.utcnow()
+
+    if bars.empty:
+        log.warning("No bars from Databento — possible holiday or API issue")
+        tg(f"<b>{LABEL} ORB - {today}</b>\nNo data from Databento. Check API or market holiday.")
+        sys.exit(1)
 
     while True:
         now  = now_et()
         h, m = now.hour, now.minute
 
+        if (datetime.utcnow() - last_fetch).total_seconds() >= 120:
+            new = get_latest_bars(last_fetch)
+            if not new.empty:
+                bars = pd.concat([bars, new]).sort_index()
+                bars = bars[~bars.index.duplicated(keep="last")]
+            last_fetch = datetime.utcnow()
+
+        today_bars = bars[[d == today for d in bars.index.date]].copy()
+
         if h >= 16:
             t = state.get("trade")
             if t and not t.get("closed"):
-                bars = get_bars()
-                today_b = bars[bars.index.date == today] if not bars.empty else bars
-                exit_price = float(today_b.iloc[-1]["close"]) if not today_b.empty else t["entry_price"]
+                exit_price = float(today_bars.iloc[-1]["close"]) if not today_bars.empty else t["entry_price"]
                 pnl_pts = (exit_price - t["entry_price"]) if t["dir"] == "long" else (t["entry_price"] - exit_price)
                 pnl_usd = pnl_pts * POINT_VALUE - COMMISSION
                 log_trade({"date": str(today), "direction": t["dir"],
@@ -184,13 +238,6 @@ def run():
             time.sleep(60)
             continue
 
-        bars = get_bars()
-        if bars.empty:
-            log.warning("No bar data — market holiday or data unavailable")
-            time.sleep(300)
-            continue
-
-        today_bars = bars[[d == today for d in bars.index.date]].copy()
         if today_bars.empty:
             if h > 9 or (h == 9 and m >= 30):
                 log.info("No market data after 9:30 AM ET — treating as market holiday.")
