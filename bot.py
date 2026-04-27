@@ -16,17 +16,18 @@ from pathlib import Path
 from collections import defaultdict
 
 # ── Config ────────────────────────────────────────────────────────────────────
-TG_TOKEN   = "8552528128:AAF_kCmAVB8-7WvULrbDgvCrS4vbP9gL62o"
-TG_CHAT_ID = "1136518861"
-LOG_DIR    = Path("/root/orb_forward_test")
-TRADE_LOG  = LOG_DIR / "trades.csv"
-STATE_F    = LOG_DIR / "daily_state.json"
+TG_TOKEN        = "8552528128:AAF_kCmAVB8-7WvULrbDgvCrS4vbP9gL62o"
+TG_CHAT_ID      = "1136518861"
+LOG_DIR         = Path("/root/orb_forward_test")
+TRADE_LOG       = LOG_DIR / "trades.csv"
+STATE_F         = LOG_DIR / "daily_state.json"
+BASELINE_LOG    = Path("/root/orb_forward_test_baseline/trades.csv")
 
 # Topstep 150K rules
 PROFIT_TARGET  = 9_000
 MAX_DAILY_LOSS = 3_000
 MAX_TRAIL_DD   = 4_500
-CONSIST_CAP    = 4_500   # max single day
+CONSIST_CAP    = 4_500
 MIN_DAYS       = 5
 
 logging.basicConfig(level=logging.INFO,
@@ -59,10 +60,10 @@ def get_updates(offset: int) -> list:
 
 
 # ── Data loading ──────────────────────────────────────────────────────────────
-def load_trades() -> list[dict]:
-    if not TRADE_LOG.exists():
+def load_trades(path: Path = TRADE_LOG) -> list[dict]:
+    if not path.exists():
         return []
-    with open(TRADE_LOG, newline="") as f:
+    with open(path, newline="") as f:
         return list(csv.DictReader(f))
 
 
@@ -179,10 +180,15 @@ def rolling_window_stats(trades: list[dict], window: int = 30) -> dict:
 def cmd_help() -> str:
     return (
         "<b>ORB Forward Test Bot</b>\n\n"
+        "<b>Filtered runner (AlphaLabs):</b>\n"
         "/stats    — full portfolio summary\n"
         "/today    — today's session status\n"
         "/trades   — last 10 trades\n"
-        "/window   — rolling 30-day vs Topstep 150K\n"
+        "/window   — rolling 30-day vs Topstep 150K\n\n"
+        "<b>Baseline runner (no filter):</b>\n"
+        "/b_stats   — baseline portfolio summary\n"
+        "/b_trades  — baseline last 10 trades\n"
+        "/b_window  — baseline rolling 30-day\n\n"
         "/help     — this message"
     )
 
@@ -315,14 +321,93 @@ def cmd_window() -> str:
     return "\n".join(lines)
 
 
+# ── Baseline command handlers ─────────────────────────────────────────────────
+def cmd_baseline_stats() -> str:
+    trades = load_trades(BASELINE_LOG)
+    if not trades:
+        return "No baseline trades logged yet."
+    s = portfolio_stats(trades)
+    pf_str = f"{s['profit_factor']:.2f}" if s['profit_factor'] != float("inf") else "∞"
+    sign   = "+" if s['total_pnl'] >= 0 else ""
+    lines = [
+        f"<b>Baseline Summary (No Filter)</b>",
+        f"Period: {trades[0]['date']} → {trades[-1]['date']}",
+        f"",
+        f"Trades:         {s['n_trades']}",
+        f"Trading days:   {s['n_days']}",
+        f"Win rate:       {s['win_rate']:.1%}",
+        f"Avg winner:     +${s['avg_win']:,.0f}",
+        f"Avg loser:      ${s['avg_loss']:,.0f}",
+        f"Profit factor:  {pf_str}",
+        f"",
+        f"Total PnL:      {sign}${s['total_pnl']:,.0f}",
+        f"Max drawdown:   ${s['max_dd']:,.0f}  (limit $4,500)",
+        f"Best day:       +${s['best_day']:,.0f}  (limit $4,500)",
+        f"Worst day:      ${s['worst_day']:,.0f}  (limit -$3,000)",
+    ]
+    return "\n".join(lines)
+
+
+def cmd_baseline_trades() -> str:
+    trades = load_trades(BASELINE_LOG)
+    if not trades:
+        return "No baseline trades logged yet."
+    recent = trades[-10:]
+    lines  = [f"<b>Baseline Last {len(recent)} Trades</b>", ""]
+    for t in recent:
+        pnl  = float(t["pnl_dollars"])
+        sign = "+" if pnl >= 0 else ""
+        icon = "WIN" if pnl >= 0 else "LOSS"
+        lines.append(f"{icon} {t['date']} {t['direction'].upper()}  {sign}${pnl:,.0f}  [{t['exit_reason']}]")
+    total = sum(float(t["pnl_dollars"]) for t in recent)
+    sign  = "+" if total >= 0 else ""
+    lines.append(f"\nLast {len(recent)} total: {sign}${total:,.0f}")
+    return "\n".join(lines)
+
+
+def cmd_baseline_window() -> str:
+    trades = load_trades(BASELINE_LOG)
+    if not trades:
+        return "No baseline trades logged yet."
+    w = rolling_window_stats(trades, window=30)
+    if not w:
+        return "Not enough baseline data for a 30-day window yet."
+    pct   = min(w["total"] / PROFIT_TARGET * 100, 100)
+    bar_n = int(pct / 5)
+    bar   = "█" * bar_n + "░" * (20 - bar_n)
+    lines = [
+        f"<b>Baseline Rolling 30-Day (No Filter)</b>",
+        f"{w['start']} → {w['end']}",
+        f"",
+        f"Progress:  [{bar}] {pct:.0f}%",
+        f"PnL:       ${w['total']:,.0f} / ${PROFIT_TARGET:,}",
+        f"",
+        f"Trading days:  {w['days']} / {MIN_DAYS} min",
+        f"Max drawdown:  ${w['max_dd']:,.0f}  (limit ${MAX_TRAIL_DD:,})",
+        f"Best day:      ${w['best_day']:,.0f}  (limit ${CONSIST_CAP:,})",
+        f"Worst day:     ${w['worst_day']:,.0f}  (limit -${MAX_DAILY_LOSS:,})",
+        f"",
+    ]
+    if w["passed"]:
+        lines.append("Status: PASS — challenge target met!")
+    elif w["fail_reason"]:
+        lines.append(f"Status: FAIL — {w['fail_reason']}")
+    else:
+        lines.append("Status: In progress...")
+    return "\n".join(lines)
+
+
 # ── Main polling loop ─────────────────────────────────────────────────────────
 COMMANDS = {
-    "/help":    cmd_help,
-    "/start":   cmd_help,
-    "/stats":   cmd_stats,
-    "/today":   cmd_today,
-    "/trades":  cmd_trades,
-    "/window":  cmd_window,
+    "/help":      cmd_help,
+    "/start":     cmd_help,
+    "/stats":     cmd_stats,
+    "/today":     cmd_today,
+    "/trades":    cmd_trades,
+    "/window":    cmd_window,
+    "/b_stats":   cmd_baseline_stats,
+    "/b_trades":  cmd_baseline_trades,
+    "/b_window":  cmd_baseline_window,
 }
 
 

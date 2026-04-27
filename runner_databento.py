@@ -22,6 +22,11 @@ ALPHALABS_KEY = "alph_O5G06XBtU9DKmAzzzqhttdq4tsq_vdir"
 TG_TOKEN      = "8552528128:AAF_kCmAVB8-7WvULrbDgvCrS4vbP9gL62o"
 TG_CHAT_ID    = "1136518861"
 
+# ── Live mode flag ────────────────────────────────────────────────────────────
+# Set to True when ready to execute real orders via Rithmic on prop firm account.
+# Everything else stays identical — only order placement activates.
+LIVE_MODE = False
+
 # ── Strategy params ───────────────────────────────────────────────────────────
 RR           = 6.0
 SL_DEFAULT   = 25.0
@@ -123,6 +128,8 @@ def get_latest_bars(since: datetime) -> pd.DataFrame:
 
 
 # ── AlphaLabs macro bias ──────────────────────────────────────────────────────
+SKIP = "SKIP"  # sentinel: AlphaLabs failed → skip trade (safe default for live money)
+
 def get_macro_bias():
     for attempt in range(1, 4):
         try:
@@ -149,8 +156,31 @@ def get_macro_bias():
         except Exception as e:
             log.warning(f"AlphaLabs error (attempt {attempt}/3): {e}")
             time.sleep(5)
-    log.warning("AlphaLabs: all 3 attempts failed — defaulting to None")
-    return None
+    log.warning("AlphaLabs: all 3 attempts failed — skipping trade (safe default)")
+    return SKIP
+
+
+# ── Rithmic execution stubs (activate when LIVE_MODE = True) ──────────────────
+def place_entry_order(direction: str, price: float):
+    if not LIVE_MODE:
+        return
+    # TODO: wire up Rithmic API
+    # client.place_limit_order(symbol="NQM6", direction=direction, price=price, qty=1)
+    log.info(f"[LIVE] Entry order: {direction} limit @ {price:.2f}")
+
+def update_stop(new_sl: float):
+    if not LIVE_MODE:
+        return
+    # TODO: wire up Rithmic API
+    # client.modify_stop(new_price=new_sl)
+    log.info(f"[LIVE] Stop updated to {new_sl:.2f}")
+
+def flatten_position(reason: str):
+    if not LIVE_MODE:
+        return
+    # TODO: wire up Rithmic API
+    # client.flatten()
+    log.info(f"[LIVE] Position flattened — {reason}")
 
 
 # ── Session levels for SL anchoring ──────────────────────────────────────────
@@ -346,6 +376,13 @@ def run():
                 time.sleep(120); continue
 
             # News filter
+            if macro_bias == SKIP:
+                log.info("SKIP: AlphaLabs unavailable — skipping trade (safe default)")
+                tg(f"<b>TRADE SKIPPED - {today}</b>\n"
+                   f"AlphaLabs API unavailable — skipping to protect account.")
+                state["phase"] = "done"; save_state(state)
+                time.sleep(300); continue
+
             if macro_bias is not None and macro_bias != orb_dir:
                 log.info(f"SKIP: ORB={orb_dir} conflicts with macro={bias_label(macro_bias)}")
                 tg(f"<b>TRADE SKIPPED - {today}</b>\n"
@@ -385,6 +422,7 @@ def run():
             state["phase"] = "in_trade"
             save_state(state)
 
+            place_entry_order(orb_dir, entry_price)
             tg(f"<b>TRADE ENTERED - {today}</b>\n"
                f"Dir: {orb_dir.upper()} | Entry: {entry_price:.2f}\n"
                f"SL: {sl_price:.2f} ({sl_src}) | TP: {tp_price:.2f}\n"
@@ -422,7 +460,9 @@ def run():
                             exit_price = tp_price; exit_reason = "tp"; exit_ts = ts; break
                         if hi > trail_best: trail_best = hi
                         new_sl = trail_best - sl_dist
-                        if new_sl > current_sl: current_sl = new_sl; be_triggered = True
+                        if new_sl > current_sl:
+                            current_sl = new_sl; be_triggered = True
+                            update_stop(current_sl)
                     else:
                         if hi >= current_sl:
                             exit_price = current_sl; exit_reason = "trail_sl" if be_triggered else "sl"; exit_ts = ts; break
@@ -430,7 +470,9 @@ def run():
                             exit_price = tp_price; exit_reason = "tp"; exit_ts = ts; break
                         if lo < trail_best: trail_best = lo
                         new_sl = trail_best + sl_dist
-                        if new_sl < current_sl: current_sl = new_sl; be_triggered = True
+                        if new_sl < current_sl:
+                            current_sl = new_sl; be_triggered = True
+                            update_stop(current_sl)
 
                 state["trade"]["current_sl"]   = current_sl
                 state["trade"]["trail_best"]   = trail_best
@@ -450,6 +492,7 @@ def run():
                         "zone_low": t["zone_low"], "zone_mid": t["zone_mid"],
                         "sl_source": t["sl_source"], "macro_bias": str(macro_bias)
                     })
+                    flatten_position(exit_reason)
                     sign = "+" if pnl_usd >= 0 else ""
                     tg(f"<b>{'PROFIT' if pnl_usd>=0 else 'LOSS'} - {today}</b>\n"
                        f"Dir: {orb_dir.upper()} | Exit: {exit_reason.upper()}\n"
