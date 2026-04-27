@@ -3,3 +3,5 @@ __pycache__/
 *.pyo
 *.log
 runner.lock
+trades.csv
+daily_state.json
