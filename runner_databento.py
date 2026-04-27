@@ -16,7 +16,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 # ── Credentials ───────────────────────────────────────────────────────────────
-DATABENTO_KEY = "db-h5wnQp9gsEGnQXJATChvRkNY5hAv8"
+DATABENTO_KEY = "db-JHyuGmSqBJBmyqrdMaN4CcJqB7UPu"
 ALPHALABS_URL = "https://app.alphalabs.live/api/v1/macro-compass"
 ALPHALABS_KEY = "alph_O5G06XBtU9DKmAzzzqhttdq4tsq_vdir"
 TG_TOKEN      = "8552528128:AAF_kCmAVB8-7WvULrbDgvCrS4vbP9gL62o"
@@ -246,7 +246,7 @@ def now_et() -> datetime:
     return datetime.now(ET).replace(tzinfo=None)
 
 def bias_label(b) -> str:
-    return {"long": "BULLISH", "short": "BEARISH", None: "NEUTRAL"}.get(b, "NEUTRAL")
+    return {"long": "BULLISH", "short": "BEARISH", None: "NEUTRAL", SKIP: "API FAILED"}.get(b, "NEUTRAL")
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -317,6 +317,7 @@ def run():
                            "pnl_dollars": round(pnl_usd, 2), "zone_high": t["zone_high"],
                            "zone_low": t["zone_low"], "zone_mid": t["zone_mid"],
                            "sl_source": t["sl_source"], "macro_bias": str(macro_bias)})
+                flatten_position("session_close")
                 sign = "+" if pnl_usd >= 0 else ""
                 tg(f"<b>SESSION CLOSE - {today}</b>\n"
                    f"Dir: {t['dir'].upper()} | Reason: SESSION_CLOSE\n"

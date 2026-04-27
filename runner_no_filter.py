@@ -17,7 +17,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 # ── Credentials ───────────────────────────────────────────────────────────────
-DATABENTO_KEY = "db-h5wnQp9gsEGnQXJATChvRkNY5hAv8"
+DATABENTO_KEY = "db-JHyuGmSqBJBmyqrdMaN4CcJqB7UPu"
 TG_TOKEN      = "8552528128:AAF_kCmAVB8-7WvULrbDgvCrS4vbP9gL62o"
 TG_CHAT_ID    = "1136518861"
 
